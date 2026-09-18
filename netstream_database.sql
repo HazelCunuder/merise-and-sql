@@ -7,12 +7,16 @@ SET search_path TO netstream, public;
 
 CREATE TABLE genre (
     id_genre       SERIAL PRIMARY KEY,
-    nom_genre      VARCHAR(255) NOT NULL UNIQUE
+    nom_genre      VARCHAR(255) NOT NULL UNIQUE,
+    date_creation  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    date_modification TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE role (
     id_role        SERIAL PRIMARY KEY,
-    nom_role       VARCHAR(50) NOT NULL UNIQUE
+    nom_role       VARCHAR(50) NOT NULL UNIQUE,
+    date_creation  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    date_modification TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE intervenant (
@@ -23,6 +27,8 @@ CREATE TABLE intervenant (
     date_ajout     DATE NOT NULL DEFAULT CURRENT_DATE,
     genre          VARCHAR(2) NOT NULL,
     nationalite    VARCHAR(255) NOT NULL,
+    date_creation  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    date_modification TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT ck_intervenant_genre
         CHECK (genre IN ('M', 'F', 'NB'))
 );
@@ -33,7 +39,23 @@ CREATE TABLE utilisateur (
     prenom_utilisateur VARCHAR(100) NOT NULL,
     email            VARCHAR(255) NOT NULL UNIQUE,
     mot_de_passe     VARCHAR(255) NOT NULL,
-    date_inscription DATE NOT NULL DEFAULT CURRENT_DATE
+    date_inscription DATE NOT NULL DEFAULT CURRENT_DATE,
+    date_creation    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    date_modification TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE utilisateur_archive (
+    id_archive        SERIAL PRIMARY KEY,
+    id_utilisateur    INTEGER NOT NULL,
+    colonne           VARCHAR(100) NOT NULL,
+    ancienne_valeur   VARCHAR(255),
+    nouvelle_valeur   VARCHAR(255),
+    date_modification TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_utilisateur_archive_utilisateur
+        FOREIGN KEY (id_utilisateur)
+        REFERENCES utilisateur(id_utilisateur)
+        ON DELETE CASCADE
+        ON UPDATE CASCADE
 );
 
 CREATE TABLE film (
@@ -41,6 +63,8 @@ CREATE TABLE film (
     nom           VARCHAR(100) NOT NULL,
     date_sortie   DATE NOT NULL,
     duree         INTEGER NOT NULL,
+    date_creation TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    date_modification TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT ck_film_duree CHECK (duree >= 0)
 );
 
@@ -48,6 +72,8 @@ CREATE TABLE casting (
     id_intervenant INTEGER NOT NULL,
     id_role        INTEGER NOT NULL,
     id_film        INTEGER NOT NULL,
+    date_creation  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    date_modification TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     PRIMARY KEY (id_intervenant, id_role, id_film),
 
@@ -73,6 +99,8 @@ CREATE TABLE casting (
 CREATE TABLE definir_genre (
     id_film   INTEGER NOT NULL,
     id_genre  INTEGER NOT NULL,
+    date_creation TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    date_modification TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     PRIMARY KEY (id_film, id_genre),
 
@@ -94,6 +122,8 @@ CREATE TABLE film_favori (
     id_film        INTEGER NOT NULL,
     note           INTEGER,
     favori         BOOLEAN NOT NULL DEFAULT TRUE,
+    date_creation  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    date_modification TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     PRIMARY KEY (id_utilisateur, id_film),
 
@@ -118,6 +148,8 @@ CREATE TABLE appreciation (
     id_intervenant INTEGER NOT NULL,
     note           INTEGER,
     favori         BOOLEAN NOT NULL DEFAULT TRUE,
+    date_creation  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    date_modification TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     PRIMARY KEY (id_utilisateur, id_intervenant),
 
@@ -136,6 +168,99 @@ CREATE TABLE appreciation (
     CONSTRAINT ck_appreciation_note
         CHECK (note IS NULL OR note BETWEEN 0 AND 10)
 );
+
+CREATE OR REPLACE FUNCTION audit_utilisateur_modification()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        IF OLD.nom_utilisateur IS DISTINCT FROM NEW.nom_utilisateur THEN
+            INSERT INTO utilisateur_archive(id_utilisateur, colonne, ancienne_valeur, nouvelle_valeur)
+            VALUES (NEW.id_utilisateur, 'nom_utilisateur', OLD.nom_utilisateur, NEW.nom_utilisateur);
+        END IF;
+
+        IF OLD.prenom_utilisateur IS DISTINCT FROM NEW.prenom_utilisateur THEN
+            INSERT INTO utilisateur_archive(id_utilisateur, colonne, ancienne_valeur, nouvelle_valeur)
+            VALUES (NEW.id_utilisateur, 'prenom_utilisateur', OLD.prenom_utilisateur, NEW.prenom_utilisateur);
+        END IF;
+
+        IF OLD.email IS DISTINCT FROM NEW.email THEN
+            INSERT INTO utilisateur_archive(id_utilisateur, colonne, ancienne_valeur, nouvelle_valeur)
+            VALUES (NEW.id_utilisateur, 'email', OLD.email, NEW.email);
+        END IF;
+
+        IF OLD.mot_de_passe IS DISTINCT FROM NEW.mot_de_passe THEN
+            INSERT INTO utilisateur_archive(id_utilisateur, colonne, ancienne_valeur, nouvelle_valeur)
+            VALUES (NEW.id_utilisateur, 'mot_de_passe', OLD.mot_de_passe, NEW.mot_de_passe);
+        END IF;
+
+        NEW.date_modification := CURRENT_TIMESTAMP;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE TRIGGER trg_audit_utilisateur_update
+BEFORE UPDATE ON utilisateur
+FOR EACH ROW
+EXECUTE FUNCTION audit_utilisateur_modification();
+
+CREATE OR REPLACE PROCEDURE lister_films_d_un_realisateur(p_nom VARCHAR, p_prenom VARCHAR)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    film_data RECORD;
+BEGIN
+    FOR film_data IN
+        SELECT f.nom AS nom_film, f.date_sortie
+        FROM film f
+        JOIN casting c ON c.id_film = f.id_film
+        JOIN role r ON r.id_role = c.id_role
+        JOIN intervenant i ON i.id_intervenant = c.id_intervenant
+        WHERE r.nom_role = 'Réalisateur'
+          AND i.nom = p_nom
+          AND i.prenom = p_prenom
+        ORDER BY f.date_sortie DESC
+    LOOP
+        RAISE NOTICE 'Film: %, sortie: %', film_data.nom_film, film_data.date_sortie;
+    END LOOP;
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE ajouter_acteur_au_film(
+    p_nom VARCHAR,
+    p_prenom VARCHAR,
+    p_date_naissance DATE,
+    p_genre VARCHAR,
+    p_nationalite VARCHAR,
+    p_nom_film VARCHAR,
+    p_nom_role VARCHAR DEFAULT 'Acteur'
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_id_film INTEGER;
+    v_id_role INTEGER;
+    v_id_intervenant INTEGER;
+BEGIN
+    SELECT id_film INTO v_id_film FROM film WHERE nom = p_nom_film;
+    IF v_id_film IS NULL THEN
+        RAISE EXCEPTION 'Film inconnu: %', p_nom_film;
+    END IF;
+
+    SELECT id_role INTO v_id_role FROM role WHERE nom_role = p_nom_role;
+    IF v_id_role IS NULL THEN
+        RAISE EXCEPTION 'Rôle inconnu: %', p_nom_role;
+    END IF;
+
+    INSERT INTO intervenant(nom, prenom, date_naissance, genre, nationalite)
+    VALUES (p_nom, p_prenom, p_date_naissance, p_genre, p_nationalite)
+    RETURNING id_intervenant INTO v_id_intervenant;
+
+    INSERT INTO casting(id_intervenant, id_role, id_film)
+    VALUES (v_id_intervenant, v_id_role, v_id_film);
+END;
+$$;
 
 
 INSERT INTO genre (nom_genre) VALUES
